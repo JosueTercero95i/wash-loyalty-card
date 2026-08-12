@@ -1,0 +1,172 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── EL RÁPIDO AUTOLAVADO: Sistema de Color Global ── */
+    --brand-primary:      #002C47;
+    --brand-secondary:    #1E3E5F;
+    --brand-complement:   #456A83;
+    --brand-cream-p:      #FEF2DD;
+    --brand-cream-s:      #FEEDD3;
+    --brand-border:       #E8DECC;
+    --brand-white:        #FFFFFF;
+
+    /* ── Programa Premium (Borgoña) ── */
+    --premium-primary:    #7F0000;
+    --premium-secondary:  #381C26;
+    --premium-accent:     #C89B5A;
+    --premium-bg:         #FFF1DF;
+
+    /* ── Programa Nítido ── */
+    --nitido-primary:     #0B4968;
+    --nitido-secondary:   #456A83;
+    --nitido-accent:      #7DB7D5;
+    --nitido-accent-light:#BFD9E5;
+    --nitido-bg:          #F1F7FA;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background-color: #FEF2DD;
+    color: #002C47;
+    min-height: 100dvh;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  /* ── Card contenedora sin sombras ── */
+  .glass-card {
+    @apply rounded-3xl border;
+    background: #FEEDD3;
+    border-color: #E8DECC;
+    box-shadow: none;
+  }
+
+  /* ── Premium loyalty card sin sombras ────────────── */
+  .loyalty-card-premium {
+    background: linear-gradient(135deg, #7F0000 0%, #381C26 55%, #002C47 100%);
+    color: #FFFFFF;
+    box-shadow: none;
+    border: 1.5px solid #C89B5A;
+  }
+
+  /* ── Nítido loyalty card sin sombras ───────────────── */
+  .loyalty-card-nitido {
+    background: linear-gradient(135deg, #003B59 0%, #456A83 50%, #7DB7D5 100%);
+    color: #FFFFFF;
+    box-shadow: none;
+    border: 1.5px solid #7DB7D5;
+  }
+
+  /* ── Input styled sin sombras ────── */
+  .flw-input {
+    @apply w-full rounded-2xl border px-5 py-4 transition-all duration-200 outline-none;
+    background: #FFFDF9;
+    border-color: #E8DECC;
+    color: #002C47;
+    font-family: 'Inter', sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .flw-input::placeholder {
+    color: #456A83;
+    font-weight: 500;
+    opacity: 0.8;
+  }
+
+  .flw-input:focus {
+    border-color: #002C47;
+    background: #FFFFFF;
+    box-shadow: none;
+  }
+
+  /* ── Primary button sin sombras ─────────────────────── */
+  .flw-btn-primary {
+    @apply w-full rounded-2xl font-outfit font-bold text-lg py-4 px-8
+           transition-all duration-200 active:scale-95 select-none cursor-pointer
+           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
+    background: linear-gradient(135deg, #002C47 0%, #1E3E5F 100%);
+    color: #FEF2DD;
+    border: 1px solid #002C47;
+    box-shadow: none;
+  }
+
+  .flw-btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #1E3E5F 0%, #002C47 100%);
+    box-shadow: none;
+    transform: translateY(-1px);
+  }
+
+  /* ── Secondary button (Consultar otra tarjeta) sin sombras ──────────── */
+  .flw-btn-secondary {
+    @apply rounded-2xl font-outfit font-bold text-base py-3 px-6
+           transition-all duration-200 active:scale-95 select-none cursor-pointer
+           inline-flex items-center justify-center gap-2;
+    background: #002C47;
+    color: #FEF2DD;
+    border: 1px solid #002C47;
+    box-shadow: none;
+  }
+
+  .flw-btn-secondary:hover {
+    background: #1E3E5F;
+    box-shadow: none;
+  }
+
+  /* ── Shimmer skeleton ───────────────────────────────────── */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      #FEEDD3 25%,
+      #FEF2DD 50%,
+      #FEEDD3 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.8s linear infinite;
+  }
+
+  /* ── Progress bar track ─────────────────────────────────── */
+  .progress-track {
+    @apply w-full rounded-full overflow-hidden;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.25);
+  }
+
+  /* ── Reward unlocked card sin sombras ───────────────────── */
+  .reward-unlocked-card {
+    background: #FFF1DF;
+    border: 1.5px solid #C89B5A;
+    box-shadow: none;
+  }
+}
+
+@layer utilities {
+  .font-outfit { font-family: 'Outfit', sans-serif; }
+  .font-inter  { font-family: 'Inter', sans-serif; }
+
+  .delay-100 { animation-delay: 100ms; }
+  .delay-200 { animation-delay: 200ms; }
+  .delay-300 { animation-delay: 300ms; }
+  .delay-400 { animation-delay: 400ms; }
+  .delay-500 { animation-delay: 500ms; }
+
+  .animate-ready { opacity: 0; }
+}
