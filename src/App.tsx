@@ -131,17 +131,7 @@ function AppContent() {
           </AnimatePresence>
         </div>
 
-        {/* Footer */}
-        <motion.footer
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 1.2 }}
-          className="fixed bottom-0 left-0 right-0 py-3 text-center"
-        >
-          <p className="text-flw-muted/40 text-[11px] font-inter">
-            El Rápido Autolavado · Programa de Fidelidad
-          </p>
-        </motion.footer>
+
       </main>
     </div>
   );
