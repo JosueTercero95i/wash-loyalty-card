@@ -1,25 +1,18 @@
 -- ============================================================================
--- MIGRACIÓN v2: Búsqueda Flexible — Fast Lane Wash Loyalty Card
--- Fecha: 2026-08-10
--- Reemplaza la versión inicial del RPC get_public_loyalty_card.
+-- MIGRACIÓN v3: Soporte Historial Anterior (Legacy) — Fast Lane Wash Loyalty Card
+-- Fecha: 2026-08-17
+-- Reemplaza get_public_loyalty_card.
 -- Cambios:
---   · Nueva función helper flw_normalize() (unaccent + lower + trim + spaces)
---   · Búsqueda tokenizada por palabras (no cadena exacta)
---   · Manejo de múltiples coincidencias → 'multiple_matches'
---   · Rate limiting idempotente (CREATE IF NOT EXISTS)
---   · Los últimos 4 dígitos del teléfono son el segundo factor de seguridad
+--   · Retorna objeto 'legacy' con estadísticas y log de visitas anteriores (loyalty_visits)
+--   · Retorna 'lastVisit' en el objeto customer
+--   · Prioriza coincidencia exacta del nombre completo cuando hay múltiples candidatos
+--   · Soporta clientes que solo tienen historial anterior (loyalty_progress = null)
 -- ============================================================================
 
 -- ── 0. EXTENSIÓN UNACCENT ─────────────────────────────────────────────────────
--- Permite búsqueda sin tildes: 'perez' coincide con 'Pérez'.
--- Si ya está habilitada, el IF NOT EXISTS la ignora sin error.
 CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA public;
 
 -- ── 1. HELPER: flw_normalize ──────────────────────────────────────────────────
--- Normaliza texto para comparación:
---   unaccent (quita tildes) + lower + trim + colapso de espacios múltiples.
--- IMMUTABLE: PostgreSQL puede cachear el resultado para el mismo input.
--- SECURITY INVOKER: no necesita privilegios elevados; es solo texto.
 CREATE OR REPLACE FUNCTION public.flw_normalize(p_text TEXT)
 RETURNS TEXT
 LANGUAGE plpgsql
@@ -28,29 +21,19 @@ SECURITY INVOKER
 SET search_path = public
 AS $$
 BEGIN
-  -- unaccent() elimina diacríticos: 'Pérez' → 'Perez', 'José' → 'Jose'
-  -- lower()   pasa a minúsculas
-  -- trim()    elimina espacios al inicio/final
-  -- regexp_replace(..., '\s+', ' ', 'g')  colapsa espacios múltiples
   RETURN lower(trim(regexp_replace(
     unaccent(COALESCE(p_text, '')),
     '\s+', ' ', 'g'
   )));
 EXCEPTION
-  -- Si por alguna razón unaccent no está disponible, fallback sin ella
   WHEN undefined_function THEN
     RETURN lower(trim(regexp_replace(COALESCE(p_text, ''), '\s+', ' ', 'g')));
 END;
 $$;
 
--- Permitir que la función sea usable sin necesidad de calificar el esquema
 GRANT EXECUTE ON FUNCTION public.flw_normalize(TEXT) TO anon, authenticated;
 
-COMMENT ON FUNCTION public.flw_normalize IS
-  'Normaliza texto para búsqueda flexible: unaccent + lower + trim + colapso de espacios. '
-  'Ejemplo: flw_normalize(''  PÉREZ  González '') → ''perez gonzalez''';
-
--- ── 2. TABLA RATE LIMITING (idempotente) ─────────────────────────────────────
+-- ── 2. TABLA RATE LIMITING ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.loyalty_lookup_attempts (
   id           BIGSERIAL   PRIMARY KEY,
   ip           TEXT        NOT NULL,
@@ -60,32 +43,9 @@ CREATE TABLE IF NOT EXISTS public.loyalty_lookup_attempts (
 CREATE INDEX IF NOT EXISTS idx_loyalty_lookup_ip_time
   ON public.loyalty_lookup_attempts (ip, attempted_at DESC);
 
--- Sin políticas RLS → solo accesible desde SECURITY DEFINER
 ALTER TABLE public.loyalty_lookup_attempts ENABLE ROW LEVEL SECURITY;
 
-COMMENT ON TABLE public.loyalty_lookup_attempts IS
-  'Rate limiting para el RPC público. Sin acceso directo anon. Solo SECURITY DEFINER.';
-
--- ── 3. RPC PRINCIPAL: get_public_loyalty_card (v2) ───────────────────────────
---
--- BÚSQUEDA FLEXIBLE:
---   a) Normalizar p_name con flw_normalize().
---   b) Tokenizar por espacios → array de palabras.
---   c) Filtrar customers: phone_last4 = p_last4 (obligatorio).
---   d) Para cada candidato, calcular match_score = cantidad de tokens del
---      usuario que aparecen como palabras en el nombre normalizado del cliente.
---   e) Descartar candidatos con score = 0.
---   f) Si solo hay 1 candidato con el score máximo → devolver su tarjeta.
---   g) Si hay empate en el score máximo entre varios candidatos → 'multiple_matches'.
---
--- SEGURIDAD:
---   · Los últimos 4 dígitos del teléfono son filtro previo obligatorio.
---   · NUNCA se devuelve phone completo, email, IDs internos ni datos de otros.
---   · Rate limiting: 10 intentos / 5 min / IP.
---   · Respuesta genérica para "no encontrado" — no revela si el nombre existe.
---   · EXCEPTION WHEN OTHERS → respuesta genérica (no expone errores internos).
--- ============================================================================
-
+-- ── 3. RPC PRINCIPAL: get_public_loyalty_card (v3) ───────────────────────────
 CREATE OR REPLACE FUNCTION public.get_public_loyalty_card(
   p_name        TEXT,
   p_last4       TEXT,
@@ -104,16 +64,26 @@ DECLARE
   -- Candidatos
   v_candidate_count INT;
   v_best_score      INT;
-  v_best_count      INT;   -- cuántos candidatos tienen el score máximo
+  v_best_count      INT;
 
   -- Cliente seleccionado
   v_customer        RECORD;
 
-  -- Lealtad
+  -- Lealtad v3 (moderno)
   v_progress        RECORD;
   v_available_rewards JSONB;
   v_recent_washes   JSONB;
   v_next_milestone  JSONB;
+
+  -- Lealtad Legacy (historial anterior)
+  v_legacy_visits   INT;
+  v_legacy_earned   INT;
+  v_legacy_used     INT;
+  v_legacy_avail    INT;
+  v_legacy_in_cycle INT;
+  v_legacy_rem      INT;
+  v_legacy_log      JSONB;
+  v_legacy          JSONB;
 
   -- Rate limiting
   v_attempt_count   INT;
@@ -137,7 +107,6 @@ BEGIN
   -- 2. RATE LIMITING  (ventana de 5 min, máx 10 intentos / IP)
   -- ════════════════════════════════════════════════════════════════
 
-  -- Purgar intentos de más de 1 hora para no crecer indefinidamente
   DELETE FROM public.loyalty_lookup_attempts
    WHERE attempted_at < now() - INTERVAL '1 hour';
 
@@ -157,14 +126,11 @@ BEGIN
   -- 3. NORMALIZAR Y TOKENIZAR LA BÚSQUEDA
   -- ════════════════════════════════════════════════════════════════
 
-  -- Normalizar la entrada del usuario con nuestro helper
-  -- Ejemplo: '  PÉREZ  González ' → 'perez gonzalez'
   v_search_tokens := array_remove(
     string_to_array(public.flw_normalize(p_name), ' '),
-    ''   -- eliminar strings vacíos por si quedaran
+    ''
   );
 
-  -- Contar tokens válidos (≥ 2 caracteres para evitar ruido)
   SELECT COUNT(*) INTO v_token_count
     FROM unnest(v_search_tokens) t
    WHERE length(t) >= 2;
@@ -173,47 +139,25 @@ BEGIN
     RETURN jsonb_build_object('found', false);
   END IF;
 
-  -- Filtrar tokens cortos (< 2 chars) para la búsqueda real
   v_search_tokens := ARRAY(
     SELECT t FROM unnest(v_search_tokens) t WHERE length(t) >= 2
   );
 
   -- ════════════════════════════════════════════════════════════════
-  -- 4. BÚSQUEDA POR TOKENS CON SCORING
-  --
-  -- Para cada cliente (con phone_last4 correcto), calculamos cuántos
-  -- tokens del usuario aparecen como PALABRAS EXACTAS en su nombre
-  -- normalizado.
-  --
-  -- match_score = COUNT de tokens del usuario encontrados en el nombre
-  --
-  -- Ejemplo:
-  --   Cliente:         'juan carlos perez gonzalez'  (normalizado)
-  --   Tokens usuario:  ['juan', 'perez']
-  --   Score:           2  (ambos encontrados)
-  --
-  --   Cliente:         'carlos perez'  (normalizado)
-  --   Tokens usuario:  ['juan', 'perez']
-  --   Score:           1  (solo 'perez' encontrado)
-  --
-  -- La coincidencia es a nivel de PALABRA COMPLETA (no substring):
-  --   'an' NO encuentra 'juan'  — evita falsos positivos
-  --   'juan' SÍ encuentra 'juan carlos'
+  -- 4. BÚSQUEDA POR TOKENS CON SCORING Y EXACT MATCH BONUS
   -- ════════════════════════════════════════════════════════════════
 
-  -- Obtener el score máximo entre todos los candidatos con phone correcto
   SELECT
-    MAX(sub.score),   -- mejor score alcanzado
-    COUNT(*),         -- total de candidatos con score > 0
+    MAX(sub.score),
+    COUNT(*),
     SUM(CASE WHEN sub.score = (
-          -- necesitamos el MAX pero no podemos auto-referenciar;
-          -- lo calculamos como subquery inline más abajo
           SELECT MAX(s2.score)
             FROM (
               SELECT (
-                SELECT COUNT(*)::int
-                  FROM unnest(v_search_tokens) tok
-                 WHERE tok = ANY(string_to_array(public.flw_normalize(c2.name), ' '))
+                (SELECT COUNT(*)::int
+                   FROM unnest(v_search_tokens) tok
+                  WHERE tok = ANY(string_to_array(public.flw_normalize(c2.name), ' ')))
+                + (CASE WHEN public.flw_normalize(c2.name) = public.flw_normalize(p_name) THEN 10 ELSE 0 END)
               ) AS score
                 FROM public.customers c2
                WHERE c2.is_general = false
@@ -221,15 +165,16 @@ BEGIN
             ) s2
            WHERE s2.score > 0
         ) THEN 1 ELSE 0 END
-    )  -- candidatos en el score máximo
+    )
     INTO v_best_score, v_candidate_count, v_best_count
   FROM (
     SELECT
       c.id,
       (
-        SELECT COUNT(*)::int
-          FROM unnest(v_search_tokens) tok
-         WHERE tok = ANY(string_to_array(public.flw_normalize(c.name), ' '))
+        (SELECT COUNT(*)::int
+           FROM unnest(v_search_tokens) tok
+          WHERE tok = ANY(string_to_array(public.flw_normalize(c.name), ' ')))
+        + (CASE WHEN public.flw_normalize(c.name) = public.flw_normalize(p_name) THEN 10 ELSE 0 END)
       ) AS score
       FROM public.customers c
      WHERE c.is_general = false
@@ -241,29 +186,34 @@ BEGIN
   -- 5. DECIDIR RESULTADO
   -- ════════════════════════════════════════════════════════════════
 
-  -- Sin ninguna coincidencia
   IF v_candidate_count IS NULL OR v_candidate_count = 0 THEN
     RETURN jsonb_build_object('found', false);
   END IF;
 
-  -- Más de un candidato con el mismo score máximo → ambiguo
-  -- Se pide al usuario que ingrese más de su nombre
   IF v_best_count > 1 THEN
     RETURN jsonb_build_object('found', false, 'error', 'multiple_matches');
   END IF;
 
-  -- Exactamente 1 candidato con el score máximo → seleccionarlo
-  SELECT c.id, c.name, c.plate, c.is_general
+  SELECT
+    c.id,
+    c.name,
+    c.plate,
+    c.is_general,
+    c.loyalty_visits,
+    c.loyalty_free_washes_earned,
+    c.loyalty_free_washes_used,
+    c.loyalty_last_visit
     INTO v_customer
     FROM public.customers c
    WHERE c.is_general = false
      AND RIGHT(REGEXP_REPLACE(COALESCE(c.phone,''),'\D','','g'),4) = p_last4
      AND (
-       SELECT COUNT(*)::int
-         FROM unnest(v_search_tokens) tok
-        WHERE tok = ANY(string_to_array(public.flw_normalize(c.name), ' '))
+       (SELECT COUNT(*)::int
+          FROM unnest(v_search_tokens) tok
+         WHERE tok = ANY(string_to_array(public.flw_normalize(c.name), ' ')))
+       + (CASE WHEN public.flw_normalize(c.name) = public.flw_normalize(p_name) THEN 10 ELSE 0 END)
      ) = v_best_score
-   ORDER BY c.id   -- desempate determinístico
+   ORDER BY c.id
    LIMIT 1;
 
   IF NOT FOUND THEN
@@ -271,10 +221,50 @@ BEGIN
   END IF;
 
   -- ════════════════════════════════════════════════════════════════
-  -- 6. DATOS DE LEALTAD
+  -- 6. DATOS DEL HISTORIAL ANTERIOR (LEGACY)
   -- ════════════════════════════════════════════════════════════════
 
-  -- Tomar el programa con mayor washes_in_cycle como el "principal"
+  v_legacy_visits   := COALESCE(v_customer.loyalty_visits, 0);
+  v_legacy_earned   := COALESCE(v_customer.loyalty_free_washes_earned, 0);
+  v_legacy_used     := COALESCE(v_customer.loyalty_free_washes_used, 0);
+  v_legacy_avail    := GREATEST(0, v_legacy_earned - v_legacy_used);
+  v_legacy_in_cycle := v_legacy_visits % 8;
+  v_legacy_rem      := 8 - (v_legacy_visits % 8);
+
+  SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+      'visitNumber',    lv.visit_number,
+      'service',        COALESCE(s.name, 'Servicio'),
+      'earnedFreeWash', COALESCE(lv.earned_free_wash, false),
+      'date',           to_char(lv.created_at AT TIME ZONE 'America/Managua', 'YYYY-MM-DD"T"HH24:MI:SS')
+    ) ORDER BY lv.visit_number DESC, lv.created_at DESC
+  ), '[]'::jsonb)
+    INTO v_legacy_log
+    FROM (
+      SELECT lv_sub.*
+        FROM public.loyalty_visits lv_sub
+       WHERE lv_sub.customer_id = v_customer.id
+       ORDER BY lv_sub.visit_number DESC, lv_sub.created_at DESC
+       LIMIT 50
+    ) lv
+    LEFT JOIN public.services s ON s.id = lv.service_id;
+
+  v_legacy := jsonb_build_object(
+    'visits',             v_legacy_visits,
+    'earned',             v_legacy_earned,
+    'used',               v_legacy_used,
+    'available',          v_legacy_avail,
+    'cycleSize',          8,
+    'progressInCycle',    v_legacy_in_cycle,
+    'remainingForReward', v_legacy_rem,
+    'lastVisit',          v_customer.loyalty_last_visit,
+    'visitsLog',          v_legacy_log
+  );
+
+  -- ════════════════════════════════════════════════════════════════
+  -- 7. DATOS DEL PROGRAMA ACTUAL (MODERNO V3)
+  -- ════════════════════════════════════════════════════════════════
+
   SELECT
     lpr.washes_in_cycle,
     lpr.total_washes,
@@ -293,18 +283,23 @@ BEGIN
    ORDER BY lpr.washes_in_cycle DESC
    LIMIT 1;
 
-  -- Cliente sin ningún programa activo → mostrar que existe pero sin historial
+  -- Cliente sin ningún programa v3 activo → mostrar tarjeta con datos de legacy
   IF NOT FOUND THEN
     RETURN jsonb_build_object(
-      'found',       true,
-      'customer',    jsonb_build_object('name', v_customer.name, 'plate', v_customer.plate),
-      'loyalty',     NULL,
-      'recentWashes', '[]'::jsonb
+      'found',        true,
+      'customer',     jsonb_build_object(
+        'name',      v_customer.name,
+        'plate',     v_customer.plate,
+        'lastVisit', v_customer.loyalty_last_visit
+      ),
+      'loyalty',      NULL,
+      'recentWashes', '[]'::jsonb,
+      'legacy',       v_legacy
     );
   END IF;
 
   -- ════════════════════════════════════════════════════════════════
-  -- 7. RECOMPENSAS DISPONIBLES
+  -- 8. RECOMPENSAS DISPONIBLES (V3)
   -- ════════════════════════════════════════════════════════════════
 
   SELECT COALESCE(jsonb_agg(
@@ -321,10 +316,9 @@ BEGIN
      AND lr.status      = 'available';
 
   -- ════════════════════════════════════════════════════════════════
-  -- 8. PRÓXIMA RECOMPENSA
+  -- 9. PRÓXIMA RECOMPENSA (V3)
   -- ════════════════════════════════════════════════════════════════
 
-  -- El menor "at" que sea mayor que washes_in_cycle actual
   SELECT jsonb_build_object(
     'at',         (r.value->>'at')::int,
     'reward',      r.value->>'reward',
@@ -336,7 +330,6 @@ BEGIN
    ORDER BY (r.value->>'at')::int ASC
    LIMIT 1;
 
-  -- Si ya superó todos los hitos → próxima es la menor del siguiente ciclo
   IF v_next_milestone IS NULL THEN
     SELECT jsonb_build_object(
       'at',         (r.value->>'at')::int,
@@ -350,7 +343,7 @@ BEGIN
   END IF;
 
   -- ════════════════════════════════════════════════════════════════
-  -- 9. HISTORIAL RECIENTE (últimos 5 lavados del programa)
+  -- 10. HISTORIAL RECIENTE (V3 - últimos 5 lavados)
   -- ════════════════════════════════════════════════════════════════
 
   SELECT COALESCE(jsonb_agg(
@@ -372,14 +365,15 @@ BEGIN
     ) sub;
 
   -- ════════════════════════════════════════════════════════════════
-  -- 10. CONSTRUIR Y RETORNAR RESPUESTA
+  -- 11. CONSTRUIR Y RETORNAR RESPUESTA COMPLETA
   -- ════════════════════════════════════════════════════════════════
 
   RETURN jsonb_build_object(
     'found',   true,
     'customer', jsonb_build_object(
-      'name',  v_customer.name,
-      'plate', v_customer.plate
+      'name',      v_customer.name,
+      'plate',     v_customer.plate,
+      'lastVisit', v_customer.loyalty_last_visit
     ),
     'loyalty', jsonb_build_object(
       'program', jsonb_build_object(
@@ -399,33 +393,16 @@ BEGIN
       'totalWashes',      v_progress.total_washes,
       'cycleNumber',      v_progress.cycle_number
     ),
-    'recentWashes', v_recent_washes
+    'recentWashes', v_recent_washes,
+    'legacy',       v_legacy
   );
 
 EXCEPTION
   WHEN OTHERS THEN
-    -- Nunca exponer detalles del error interno al cliente público
     RETURN jsonb_build_object('found', false);
 
 END;
 $$;
 
--- ── 4. GRANTS ─────────────────────────────────────────────────────────────────
--- Permitir al rol anon (web pública sin auth) ejecutar el RPC
 GRANT EXECUTE ON FUNCTION public.get_public_loyalty_card(TEXT, TEXT, TEXT) TO anon;
 GRANT EXECUTE ON FUNCTION public.get_public_loyalty_card(TEXT, TEXT, TEXT) TO authenticated;
-
-COMMENT ON FUNCTION public.get_public_loyalty_card IS
-  'RPC público v2 — búsqueda flexible por tokens de nombre + phone last 4. '
-  'SECURITY DEFINER. Rate limiting incluido. '
-  'Retorna: found=true con tarjeta | found=false con error=multiple_matches | found=false.';
-
--- ── 5. VERIFICACIÓN RÁPIDA (opcional — comentar antes de ejecutar en prod) ───
--- SELECT public.flw_normalize('  PÉREZ  González ');
--- → 'perez gonzalez'
---
--- SELECT public.flw_normalize('José María López');
--- → 'jose maria lopez'
---
--- SELECT public.get_public_loyalty_card('juan', '4821', '127.0.0.1');
--- → { "found": false }   (si no existe ese cliente) o tarjeta si existe

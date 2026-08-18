@@ -37,6 +37,26 @@ export interface RecentWash {
 export interface LoyaltyCardCustomer {
   name: string;
   plate: string | null;
+  lastVisit?: string | null;
+}
+
+export interface LegacyWashVisit {
+  visitNumber: number;
+  service: string;
+  earnedFreeWash: boolean;
+  date: string;
+}
+
+export interface LegacyLoyaltyData {
+  visits: number;
+  earned: number;
+  used: number;
+  available: number;
+  cycleSize: number;
+  progressInCycle: number;
+  remainingForReward: number;
+  lastVisit: string | null;
+  visitsLog: LegacyWashVisit[];
 }
 
 // ── RPC Response shapes ──────────────────────────────────────────────────────
@@ -44,8 +64,9 @@ export interface LoyaltyCardCustomer {
 export interface LoyaltyCardFound {
   found: true;
   customer: LoyaltyCardCustomer;
-  loyalty: LoyaltyData | null;   // null if customer exists but has no progress
+  loyalty: LoyaltyData | null;   // null if customer exists but has no v3 progress
   recentWashes: RecentWash[];
+  legacy: LegacyLoyaltyData | null;
 }
 
 export interface LoyaltyCardNotFound {
