@@ -69,11 +69,14 @@ DECLARE
   -- Cliente seleccionado
   v_customer        RECORD;
 
-  -- Lealtad v3 (moderno)
-  v_progress        RECORD;
+  -- Lealtad v3 (moderno) — soporte múltiples programas
+  v_progress          RECORD;
   v_available_rewards JSONB;
-  v_recent_washes   JSONB;
-  v_next_milestone  JSONB;
+  v_recent_washes     JSONB;
+  v_next_milestone    JSONB;
+  v_milestones        JSONB;
+  v_loyalty_programs  JSONB := '[]'::jsonb;  -- array de todos los programas activos
+  v_loyalty_program_obj JSONB;
 
   -- Lealtad Legacy (historial anterior)
   v_legacy_visits   INT;
@@ -262,111 +265,158 @@ BEGIN
   );
 
   -- ════════════════════════════════════════════════════════════════
-  -- 7. DATOS DEL PROGRAMA ACTUAL (MODERNO V3)
+  -- 7. DATOS DE TODOS LOS PROGRAMAS ACTIVOS (MODERNO V3)
   -- ════════════════════════════════════════════════════════════════
 
-  SELECT
-    lpr.washes_in_cycle,
-    lpr.total_washes,
-    lpr.cycle_number,
-    lpr.program_id,
-    lp.id   AS lp_id,
-    lp.name AS lp_name,
-    lp.slug AS lp_slug,
-    lp.cycle_size,
-    lp.rewards
-    INTO v_progress
-    FROM public.loyalty_progress lpr
-    JOIN public.loyalty_programs lp ON lp.id = lpr.program_id
-   WHERE lpr.customer_id = v_customer.id
-     AND lp.active = true
-   ORDER BY lpr.washes_in_cycle DESC
-   LIMIT 1;
+  FOR v_progress IN
+    SELECT
+      lpr.washes_in_cycle,
+      lpr.total_washes,
+      lpr.cycle_number,
+      lpr.program_id,
+      lp.id        AS lp_id,
+      lp.name      AS lp_name,
+      lp.slug      AS lp_slug,
+      lp.cycle_size,
+      lp.rewards
+      FROM public.loyalty_progress lpr
+      JOIN public.loyalty_programs lp ON lp.id = lpr.program_id
+     WHERE lpr.customer_id = v_customer.id
+       AND lp.active = true
+     ORDER BY lp.slug ASC  -- orden determinista: nitido antes que premium
+  LOOP
 
-  -- Cliente sin ningún programa v3 activo → mostrar tarjeta con datos de legacy
-  IF NOT FOUND THEN
-    RETURN jsonb_build_object(
-      'found',        true,
-      'customer',     jsonb_build_object(
-        'name',      v_customer.name,
-        'plate',     v_customer.plate,
-        'lastVisit', v_customer.loyalty_last_visit
-      ),
-      'loyalty',      NULL,
-      'recentWashes', '[]'::jsonb,
-      'legacy',       v_legacy
-    );
-  END IF;
+    -- ── 8. RECOMPENSAS DISPONIBLES para este programa ──────────────
 
-  -- ════════════════════════════════════════════════════════════════
-  -- 8. RECOMPENSAS DISPONIBLES (V3)
-  -- ════════════════════════════════════════════════════════════════
+    SELECT COALESCE(jsonb_agg(
+      jsonb_build_object(
+        'rewardName',     lr.reward_name,
+        'rewardSlug',     lr.reward_slug,
+        'earnedAt',       lr.earned_at,
+        'optionGroup',    lr.option_group,
+        'optionSlug',     lr.option_slug,
+        'selectedOption', lr.selected_option,
+        'discountPercent', lr.discount_percent
+      ) ORDER BY lr.earned_at DESC
+    ), '[]'::jsonb)
+      INTO v_available_rewards
+      FROM public.loyalty_rewards lr
+     WHERE lr.customer_id = v_customer.id
+       AND lr.program_id  = v_progress.lp_id
+       AND lr.status      = 'available';
 
-  SELECT COALESCE(jsonb_agg(
-    jsonb_build_object(
-      'rewardName', lr.reward_name,
-      'rewardSlug', lr.reward_slug,
-      'earnedAt',   lr.earned_at
-    ) ORDER BY lr.earned_at DESC
-  ), '[]'::jsonb)
-    INTO v_available_rewards
-    FROM public.loyalty_rewards lr
-   WHERE lr.customer_id = v_customer.id
-     AND lr.program_id  = v_progress.lp_id
-     AND lr.status      = 'available';
+    -- ── 9. PRÓXIMA RECOMPENSA para este programa ───────────────────
 
-  -- ════════════════════════════════════════════════════════════════
-  -- 9. PRÓXIMA RECOMPENSA (V3)
-  -- ════════════════════════════════════════════════════════════════
-
-  SELECT jsonb_build_object(
-    'at',         (r.value->>'at')::int,
-    'reward',      r.value->>'reward',
-    'rewardSlug',  r.value->>'reward_slug'
-  )
-    INTO v_next_milestone
-    FROM jsonb_array_elements(v_progress.rewards) r
-   WHERE (r.value->>'at')::int > v_progress.washes_in_cycle
-   ORDER BY (r.value->>'at')::int ASC
-   LIMIT 1;
-
-  IF v_next_milestone IS NULL THEN
     SELECT jsonb_build_object(
-      'at',         (r.value->>'at')::int,
-      'reward',      r.value->>'reward',
-      'rewardSlug',  r.value->>'reward_slug'
+      'at',        (r.value->>'at')::int,
+      'reward',     COALESCE(r.value->>'reward', r.value->'options'->0->>'reward'),
+      'rewardSlug', COALESCE(r.value->>'reward_slug', r.value->'options'->0->>'reward_slug'),
+      'type',       COALESCE(r.value->>'type', 'fixed'),
+      'options',    COALESCE(r.value->'options', '[]'::jsonb)
     )
       INTO v_next_milestone
       FROM jsonb_array_elements(v_progress.rewards) r
+     WHERE (r.value->>'at')::int > v_progress.washes_in_cycle
      ORDER BY (r.value->>'at')::int ASC
      LIMIT 1;
-  END IF;
 
-  -- ════════════════════════════════════════════════════════════════
-  -- 10. HISTORIAL RECIENTE (V3 - últimos 5 lavados)
-  -- ════════════════════════════════════════════════════════════════
+    IF v_next_milestone IS NULL THEN
+      SELECT jsonb_build_object(
+        'at',        (r.value->>'at')::int,
+        'reward',     COALESCE(r.value->>'reward', r.value->'options'->0->>'reward'),
+        'rewardSlug', COALESCE(r.value->>'reward_slug', r.value->'options'->0->>'reward_slug'),
+        'type',       COALESCE(r.value->>'type', 'fixed'),
+        'options',    COALESCE(r.value->'options', '[]'::jsonb)
+      )
+        INTO v_next_milestone
+        FROM jsonb_array_elements(v_progress.rewards) r
+       ORDER BY (r.value->>'at')::int ASC
+       LIMIT 1;
+    END IF;
 
-  SELECT COALESCE(jsonb_agg(
-    jsonb_build_object(
-      'date',    to_char(sub.created_at AT TIME ZONE 'America/Managua', 'YYYY-MM-DD'),
-      'service', sub.svc_name
-    ) ORDER BY sub.created_at DESC
-  ), '[]'::jsonb)
-    INTO v_recent_washes
-    FROM (
-      SELECT wl.created_at,
-             COALESCE(s.name, 'Servicio') AS svc_name
-        FROM public.loyalty_wash_log wl
-        LEFT JOIN public.services s ON s.id = wl.service_id
-       WHERE wl.customer_id = v_customer.id
-         AND wl.program_id  = v_progress.lp_id
-       ORDER BY wl.created_at DESC
-       LIMIT 5
-    ) sub;
+    -- ── 9b. TODOS LOS MILESTONES para este programa ────────────────
+
+    v_milestones := (
+      SELECT jsonb_agg(
+        jsonb_build_object(
+          'at',         (r.value->>'at')::int,
+          'type',       COALESCE(r.value->>'type', 'fixed'),
+          'reward',     COALESCE(r.value->>'reward', r.value->'options'->0->>'reward'),
+          'reward_slug', COALESCE(r.value->>'reward_slug', r.value->'options'->0->>'reward_slug'),
+          'options',    COALESCE(r.value->'options', '[]'::jsonb)
+        ) ORDER BY (r.value->>'at')::int
+      )
+      FROM jsonb_array_elements(v_progress.rewards) r
+    );
+
+    -- ── 10. HISTORIAL RECIENTE para este programa ──────────────────
+
+    SELECT COALESCE(jsonb_agg(
+      jsonb_build_object(
+        'date',    to_char(sub.created_at AT TIME ZONE 'America/Managua', 'YYYY-MM-DD'),
+        'service', sub.svc_name
+      ) ORDER BY sub.created_at DESC
+    ), '[]'::jsonb)
+      INTO v_recent_washes
+      FROM (
+        SELECT wl.created_at,
+               COALESCE(s.name, 'Servicio') AS svc_name
+          FROM public.loyalty_wash_log wl
+          LEFT JOIN public.services s ON s.id = wl.service_id
+         WHERE wl.customer_id = v_customer.id
+           AND wl.program_id  = v_progress.lp_id
+         ORDER BY wl.created_at DESC
+         LIMIT 5
+      ) sub;
+
+    -- ── Construir objeto de este programa y agregar al array ───────
+
+    v_loyalty_program_obj := jsonb_build_object(
+      'program', jsonb_build_object(
+        'name',      v_progress.lp_name,
+        'slug',      v_progress.lp_slug,
+        'cycleSize', v_progress.cycle_size
+      ),
+      'current',              v_progress.washes_in_cycle,
+      'required',             v_progress.cycle_size,
+      'percentage',           ROUND(v_progress.washes_in_cycle::numeric / v_progress.cycle_size * 100),
+      'remaining',            v_progress.cycle_size - v_progress.washes_in_cycle,
+      'nextMilestoneAt',      (v_next_milestone->>'at')::int,
+      'nextMilestoneType',    COALESCE(v_next_milestone->>'type', 'fixed'),
+      'nextMilestoneOptions', COALESCE(v_next_milestone->'options', '[]'::jsonb),
+      'reward',               v_next_milestone->>'reward',
+      'rewardSlug',           v_next_milestone->>'rewardSlug',
+      'rewardUnlocked',       jsonb_array_length(v_available_rewards) > 0,
+      'availableRewards',     v_available_rewards,
+      'milestones',           COALESCE(v_milestones, '[]'::jsonb),
+      'totalWashes',          v_progress.total_washes,
+      'cycleNumber',          v_progress.cycle_number,
+      'recentWashes',         v_recent_washes
+    );
+
+    v_loyalty_programs := v_loyalty_programs || jsonb_build_array(v_loyalty_program_obj);
+
+  END LOOP;
 
   -- ════════════════════════════════════════════════════════════════
   -- 11. CONSTRUIR Y RETORNAR RESPUESTA COMPLETA
   -- ════════════════════════════════════════════════════════════════
+
+  -- Cliente sin ningún programa v3 activo → mostrar tarjeta con datos de legacy
+  IF jsonb_array_length(v_loyalty_programs) = 0 THEN
+    RETURN jsonb_build_object(
+      'found',          true,
+      'customer',       jsonb_build_object(
+        'name',      v_customer.name,
+        'plate',     v_customer.plate,
+        'lastVisit', v_customer.loyalty_last_visit
+      ),
+      'loyalty',        NULL,
+      'loyaltyPrograms','[]'::jsonb,
+      'recentWashes',   '[]'::jsonb,
+      'legacy',         v_legacy
+    );
+  END IF;
 
   RETURN jsonb_build_object(
     'found',   true,
@@ -375,26 +425,12 @@ BEGIN
       'plate',     v_customer.plate,
       'lastVisit', v_customer.loyalty_last_visit
     ),
-    'loyalty', jsonb_build_object(
-      'program', jsonb_build_object(
-        'name',      v_progress.lp_name,
-        'slug',      v_progress.lp_slug,
-        'cycleSize', v_progress.cycle_size
-      ),
-      'current',          v_progress.washes_in_cycle,
-      'required',         v_progress.cycle_size,
-      'percentage',       ROUND(v_progress.washes_in_cycle::numeric / v_progress.cycle_size * 100),
-      'remaining',        v_progress.cycle_size - v_progress.washes_in_cycle,
-      'nextMilestoneAt',  (v_next_milestone->>'at')::int,
-      'reward',            v_next_milestone->>'reward',
-      'rewardSlug',        v_next_milestone->>'rewardSlug',
-      'rewardUnlocked',   jsonb_array_length(v_available_rewards) > 0,
-      'availableRewards',  v_available_rewards,
-      'totalWashes',      v_progress.total_washes,
-      'cycleNumber',      v_progress.cycle_number
-    ),
-    'recentWashes', v_recent_washes,
-    'legacy',       v_legacy
+    -- 'loyalty' mantiene compatibilidad: primer programa del array
+    'loyalty',         v_loyalty_programs->0,
+    'loyaltyPrograms', v_loyalty_programs,
+    -- recentWashes a nivel raíz = washes del primer programa (compat)
+    'recentWashes',   (v_loyalty_programs->0->>'recentWashes')::jsonb,
+    'legacy',         v_legacy
   );
 
 EXCEPTION

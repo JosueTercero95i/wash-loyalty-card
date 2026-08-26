@@ -12,6 +12,33 @@ export interface AvailableReward {
   rewardName: string;
   rewardSlug: string;
   earnedAt: string;   // ISO date string
+  optionGroup?: string | null;
+  optionSlug?: string | null;
+  selectedOption?: string | null;
+  discountPercent?: number;
+}
+
+export interface RewardMilestoneOption {
+  reward: string;
+  reward_slug: string;
+  service_name_like: string;
+  discount_percent: number;
+  target_service_slug: string | null;
+}
+
+export interface RewardMilestone {
+  at: number;
+  type?: 'choice' | 'fixed';
+  reward?: string;
+  reward_slug?: string;
+  options?: RewardMilestoneOption[];
+}
+
+export interface ChoiceGroup {
+  optionGroup: string;
+  milestoneAt: number;
+  rewards: AvailableReward[];
+  options: RewardMilestoneOption[];
 }
 
 export interface LoyaltyData {
@@ -21,12 +48,16 @@ export interface LoyaltyData {
   percentage: number;     // 0..100
   remaining: number;      // cycle_size - washes_in_cycle
   nextMilestoneAt: number;  // "at" value of next reward (e.g. 5 or 9)
+  nextMilestoneType?: 'choice' | 'fixed';
+  nextMilestoneOptions?: RewardMilestoneOption[];
   reward: string;           // e.g. "Tratamiento Cerámico GRATIS"
   rewardSlug: string;
   rewardUnlocked: boolean;
   availableRewards: AvailableReward[];
+  milestones: RewardMilestone[];
   totalWashes: number;
   cycleNumber: number;
+  recentWashes?: RecentWash[];  // per-program wash history (from RPC loop)
 }
 
 export interface RecentWash {
@@ -64,7 +95,8 @@ export interface LegacyLoyaltyData {
 export interface LoyaltyCardFound {
   found: true;
   customer: LoyaltyCardCustomer;
-  loyalty: LoyaltyData | null;   // null if customer exists but has no v3 progress
+  loyalty: LoyaltyData | null;          // alias al primer programa (compat)
+  loyaltyPrograms: LoyaltyData[];       // todos los programas activos del cliente
   recentWashes: RecentWash[];
   legacy: LegacyLoyaltyData | null;
 }

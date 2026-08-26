@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase';
-import type { LoyaltyCardResponse, LoyaltyCardFound } from '@/types/loyalty';
+import type { LoyaltyCardResponse, LoyaltyCardFound, RewardMilestone } from '@/types/loyalty';
 
 /**
  * Calls the SECURITY DEFINER RPC get_public_loyalty_card.
@@ -39,7 +39,41 @@ export async function fetchLoyaltyCard(
     throw new Error(error.message || 'Connection error');
   }
 
-  return data as LoyaltyCardResponse;
+  const raw = data as LoyaltyCardResponse;
+
+  // Enrich all programs in loyaltyPrograms array
+  if (raw.found) {
+    // Normalize: if RPC doesn't send loyaltyPrograms yet, build from loyalty
+    if (!raw.loyaltyPrograms || raw.loyaltyPrograms.length === 0) {
+      raw.loyaltyPrograms = raw.loyalty ? [raw.loyalty] : [];
+    }
+
+    for (const prog of raw.loyaltyPrograms) {
+      const milestones: RewardMilestone[] = prog.milestones ?? [];
+
+      // Detect next milestone type/options from milestones array
+      const nextMilestone = milestones.find(m => m.at === prog.nextMilestoneAt);
+      prog.nextMilestoneType = nextMilestone?.type ?? 'fixed';
+      prog.nextMilestoneOptions = nextMilestone?.options ?? [];
+
+      // Fallback: reconstruct milestones if missing
+      if (!prog.milestones || prog.milestones.length === 0) {
+        prog.milestones = [
+          {
+            at: prog.nextMilestoneAt,
+            type: 'fixed',
+            reward: prog.reward,
+            reward_slug: prog.rewardSlug,
+          },
+        ];
+      }
+    }
+
+    // Keep loyalty as alias to first program
+    raw.loyalty = raw.loyaltyPrograms[0] ?? null;
+  }
+
+  return raw;
 }
 
 /**

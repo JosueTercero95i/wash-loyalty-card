@@ -1,22 +1,68 @@
 import { motion } from 'motion/react';
 import { Gift, Star, Sparkles, Flame, Droplets } from 'lucide-react';
-import type { AvailableReward } from '@/types/loyalty';
+import type { AvailableReward, RewardMilestone } from '@/types/loyalty';
 
 interface RewardBannerProps {
   rewardUnlocked: boolean;
   nextReward: string;
+  nextMilestoneType?: 'choice' | 'fixed';
+  nextMilestoneOptions?: { reward: string; discount_percent: number }[];
   remaining: number;
   nextMilestoneAt: number;
   availableRewards: AvailableReward[];
+  milestones: RewardMilestone[];
   programSlug: string;
+}
+
+/**
+ * Detect choice groups from available rewards.
+ * A choice group = 2+ rewards sharing the same optionGroup with no selectedOption.
+ */
+function detectChoiceGroups(rewards: AvailableReward[]): Map<string, AvailableReward[]> {
+  const groups = new Map<string, AvailableReward[]>();
+  for (const r of rewards) {
+    if (r.optionGroup && !r.selectedOption) {
+      const grp = groups.get(r.optionGroup) ?? [];
+      grp.push(r);
+      groups.set(r.optionGroup, grp);
+    }
+  }
+  // Only keep groups with 2+ rewards (actual choice groups)
+  for (const [key, grp] of groups) {
+    if (grp.length < 2) groups.delete(key);
+  }
+  return groups;
+}
+
+/** Get fixed (non-choice) available rewards */
+function getFixedRewards(rewards: AvailableReward[]): AvailableReward[] {
+  return rewards.filter(r => !r.optionGroup || !!r.selectedOption);
+}
+
+/** Get selected choice rewards (one chosen from a group) */
+function getSelectedChoiceRewards(rewards: AvailableReward[]): AvailableReward[] {
+  return rewards.filter(r => r.optionGroup && r.selectedOption);
+}
+
+function getEmojiForDiscount(discountPercent?: number): string {
+  return discountPercent === 100 ? '🫧' : '⭐';
+}
+
+function getEmojiForFixed(rewardSlug: string): string {
+  if (rewardSlug.includes('ceramic') || rewardSlug.includes('tratamiento')) return '✨';
+  if (rewardSlug.includes('pasteado')) return '🚘';
+  return '✨';
 }
 
 export default function RewardBanner({
   rewardUnlocked,
   nextReward,
+  nextMilestoneType,
+  nextMilestoneOptions,
   remaining,
   nextMilestoneAt,
   availableRewards,
+  milestones,
   programSlug,
 }: RewardBannerProps) {
   const isNitido = programSlug === 'nitido';
@@ -26,6 +72,11 @@ export default function RewardBanner({
   const borderCol = isNitido ? '#7DB7D5' : '#E8DECC';
 
   if (rewardUnlocked && availableRewards.length > 0) {
+    const choiceGroups = detectChoiceGroups(availableRewards);
+    const fixedRewards = getFixedRewards(availableRewards);
+    const selectedChoices = getSelectedChoiceRewards(availableRewards);
+    const hasChoiceGroups = choiceGroups.size > 0;
+
     return (
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
@@ -37,6 +88,7 @@ export default function RewardBanner({
           borderColor: borderCol,
         }}
       >
+        {/* Header */}
         <div className="flex items-center gap-3">
           <div
             className="w-11 h-11 rounded-full flex items-center justify-center shrink-0 shadow-sm"
@@ -54,18 +106,63 @@ export default function RewardBanner({
           </div>
         </div>
 
-        <div className="space-y-2 mt-1">
-          {availableRewards.map((r, i) => (
+        {/* Choice groups */}
+        {[...choiceGroups.entries()].map(([grp, grpRewards]) => {
+          // Find the milestone for this group to get the options with discount info
+          const milestone = milestones.find(m =>
+            m.options?.some(opt => grpRewards.some(r => r.rewardSlug === opt.reward_slug))
+          );
+          const options = milestone?.options ?? [];
+
+          return (
             <div
-              key={i}
-              className="flex items-center gap-2.5 rounded-2xl px-4 py-3 border shadow-xs"
+              key={grp}
+              className="rounded-2xl px-4 py-3 border shadow-xs space-y-2"
               style={{ backgroundColor: '#FFFFFF', borderColor: borderCol }}
             >
-              <Sparkles className="w-4 h-4 shrink-0" style={{ color: primaryColor }} />
-              <span className="font-bold text-sm font-inter" style={{ color: '#002C47' }}>{r.rewardName}</span>
+              <p className="font-bold text-sm font-inter" style={{ color: '#002C47' }}>
+                🎁 {milestone?.at ?? '?'} lavadas → Elige tu recompensa
+              </p>
+              <div className="space-y-1.5">
+                {options.map((opt) => (
+                  <div key={opt.reward_slug} className="flex items-center gap-2.5">
+                    <span className="text-base">{getEmojiForDiscount(opt.discount_percent)}</span>
+                    <span className="font-bold text-sm font-inter" style={{ color: '#002C47' }}>
+                      {opt.reward}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-          ))}
-        </div>
+          );
+        })}
+
+        {/* Fixed rewards */}
+        {fixedRewards.map((r, i) => (
+          <div
+            key={i}
+            className="flex items-center gap-2.5 rounded-2xl px-4 py-3 border shadow-xs"
+            style={{ backgroundColor: '#FFFFFF', borderColor: borderCol }}
+          >
+            <span className="text-base">{getEmojiForFixed(r.rewardSlug)}</span>
+            <span className="font-bold text-sm font-inter" style={{ color: '#002C47' }}>{r.rewardName}</span>
+          </div>
+        ))}
+
+        {/* Selected choice rewards */}
+        {selectedChoices.map((r, i) => (
+          <div
+            key={`sel-${i}`}
+            className="flex items-center gap-2.5 rounded-2xl px-4 py-3 border shadow-xs"
+            style={{ backgroundColor: '#FFFFFF', borderColor: borderCol }}
+          >
+            <span className="text-base">{getEmojiForDiscount(r.discountPercent)}</span>
+            <div className="flex-1 min-w-0">
+              <span className="font-bold text-sm font-inter" style={{ color: '#002C47' }}>{r.rewardName}</span>
+              <span className="text-xs font-inter ml-2" style={{ color: '#456A83' }}>✓ Elegido</span>
+            </div>
+          </div>
+        ))}
 
         <p className="text-xs font-inter px-1 font-medium" style={{ color: '#456A83' }}>
           Presentá tu nombre al llegar al autolavado para canjear tu premio.
@@ -94,11 +191,24 @@ export default function RewardBanner({
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-[11px] font-bold font-inter uppercase tracking-wider mb-0.5" style={{ color: '#456A83' }}>
-            Próxima recompensa
+            🎁 Próxima recompensa
           </p>
-          <p className="font-outfit font-black text-lg leading-tight truncate" style={{ color: '#002C47' }}>
-            {nextReward}
-          </p>
+          {nextMilestoneType === 'choice' && nextMilestoneOptions && nextMilestoneOptions.length > 0 ? (
+            <div className="space-y-0.5">
+              <p className="font-outfit font-black text-sm leading-tight" style={{ color: '#002C47' }}>
+                {nextMilestoneAt} lavadas → Elige tu recompensa
+              </p>
+              {nextMilestoneOptions.map((opt, i) => (
+                <p key={i} className="text-xs font-inter font-medium" style={{ color: '#456A83' }}>
+                  {getEmojiForDiscount(opt.discount_percent)} {opt.reward}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p className="font-outfit font-black text-lg leading-tight truncate" style={{ color: '#002C47' }}>
+              🎁 {nextMilestoneAt} lavadas → {nextReward}
+            </p>
+          )}
         </div>
       </div>
 
@@ -126,7 +236,7 @@ export default function RewardBanner({
             <>
               <span className="font-medium" style={{ color: '#456A83' }}>Te faltan </span>
               <strong className="font-black" style={{ color: primaryColor }}>{remaining}</strong>
-              <span className="font-medium" style={{ color: '#456A83' }}> lavados para la recompensa del lavado #{nextMilestoneAt}</span>
+              <span className="font-medium" style={{ color: '#456A83' }}> lavados para el lavado #{nextMilestoneAt}</span>
             </>
           )}
         </p>

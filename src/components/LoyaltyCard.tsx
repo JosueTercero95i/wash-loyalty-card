@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Car, Droplets, RefreshCw, Crown, Calendar, History, Sparkles } from 'lucide-react';
-import type { LoyaltyCardFound } from '@/types/loyalty';
+import type { LoyaltyCardFound, LoyaltyData, RecentWash } from '@/types/loyalty';
 import ProgressBar from './ProgressBar';
 import WashDots from './WashDots';
 import RewardBanner from './RewardBanner';
@@ -36,11 +36,190 @@ function formatLastVisit(dateStr?: string | null): string | null {
   }
 }
 
-export default function LoyaltyCard({ data, onReset }: LoyaltyCardProps) {
-  const { customer, loyalty, recentWashes, legacy } = data;
+// ── Internal: renders one program card + reward banner + wash history ─────────
+interface LoyaltyProgramCardProps {
+  loyalty: LoyaltyData;
+  customerName: string;
+  customerPlate: string | null;
+  recentWashes: RecentWash[];
+  index: number;
+}
 
-  // Si no tiene programa moderno pero sí tiene historial anterior, abrir en pestaña legacy
-  const hasModern = !!loyalty;
+function LoyaltyProgramCard({
+  loyalty,
+  customerName,
+  customerPlate,
+  recentWashes,
+  index,
+}: LoyaltyProgramCardProps) {
+  const {
+    program,
+    current,
+    percentage,
+    remaining,
+    nextMilestoneAt,
+    nextMilestoneType,
+    nextMilestoneOptions,
+    reward,
+    rewardUnlocked,
+    availableRewards,
+    milestones: loyaltyMilestones,
+    totalWashes,
+    cycleNumber,
+  } = loyalty;
+
+  const milestones = PROGRAM_MILESTONES[program.slug] ?? [5, 9];
+  const isNitido = program.slug === 'nitido';
+  const cardClass = isNitido ? 'loyalty-card-nitido' : 'loyalty-card-premium';
+  const accentColor = isNitido ? '#7DB7D5' : '#C89B5A';
+  const ProgramIcon = isNitido ? Droplets : Crown;
+  const programTitle = isNitido ? 'Programa Nítido' : 'Programa Premium';
+
+  // Per-program wash history: prefer loyalty.recentWashes (from RPC loop),
+  // fall back to top-level recentWashes for first program.
+  const programWashes = loyalty.recentWashes ?? (index === 0 ? recentWashes : []);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, delay: index * 0.12 }}
+      className="space-y-4"
+    >
+      <div className={`${cardClass} rounded-3xl p-6 space-y-5 relative overflow-hidden`}>
+        {/* Background decoration */}
+        <div
+          className="absolute top-0 right-0 w-48 h-48 rounded-full opacity-15 blur-3xl pointer-events-none"
+          style={{ backgroundColor: accentColor, transform: 'translate(30%, -30%)' }}
+        />
+        <div
+          className="absolute bottom-0 left-0 w-32 h-32 rounded-full opacity-10 blur-2xl pointer-events-none"
+          style={{ backgroundColor: accentColor, transform: 'translate(-30%, 30%)' }}
+        />
+
+        {/* Card header: program badge + wash count badge */}
+        <div className="flex items-start justify-between relative z-10">
+          <div>
+            <span
+              className="inline-flex items-center gap-2 text-xs font-bold px-3.5 py-1 rounded-full font-inter uppercase tracking-wider shadow-xs"
+              style={{
+                background: 'rgba(0, 0, 0, 0.3)',
+                color: accentColor,
+                border: `1px solid ${accentColor}50`,
+              }}
+            >
+              <ProgramIcon className="w-3.5 h-3.5" style={{ color: accentColor }} />
+              {programTitle}
+            </span>
+            <motion.h3
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.15 + index * 0.1 }}
+              className="text-white font-outfit font-black text-2xl mt-2.5 leading-tight"
+            >
+              {customerName}
+            </motion.h3>
+            {customerPlate && (
+              <p className="text-white/80 text-xs font-inter mt-1 flex items-center gap-1.5 font-medium">
+                <Car className="w-3.5 h-3.5" />
+                {customerPlate}
+              </p>
+            )}
+          </div>
+
+          {/* Wash count badge */}
+          <motion.div
+            initial={{ scale: 0 }}
+            animate={{ scale: 1 }}
+            transition={{ delay: 0.25 + index * 0.1, type: 'spring', stiffness: 300 }}
+            className="text-center relative z-10"
+          >
+            <div
+              className="w-16 h-16 rounded-2xl flex flex-col items-center justify-center border shadow-md"
+              style={{
+                background: 'rgba(0, 0, 0, 0.35)',
+                borderColor: `${accentColor}70`,
+              }}
+            >
+              <span className="text-white font-outfit font-black text-2xl leading-none">
+                {current}
+              </span>
+              <span className="text-white/70 text-[10px] font-inter leading-none mt-0.5 font-bold">
+                / {program.cycleSize}
+              </span>
+            </div>
+          </motion.div>
+        </div>
+
+        {/* Wash dots */}
+        <div className="relative z-10">
+          <WashDots
+            current={current}
+            cycleSize={program.cycleSize}
+            programSlug={program.slug}
+            milestones={milestones}
+          />
+        </div>
+
+        {/* Progress bar */}
+        <div className="relative z-10">
+          <ProgressBar percentage={percentage} programSlug={program.slug} />
+        </div>
+
+        {/* Stats row */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.4 + index * 0.1 }}
+          className="grid grid-cols-3 gap-3 relative z-10"
+        >
+          {[
+            { label: 'Total', value: totalWashes, unit: 'lavados' },
+            { label: 'Ciclo', value: cycleNumber + 1, unit: 'actual' },
+            { label: 'Faltan', value: remaining, unit: 'lavados' },
+          ].map(({ label, value, unit }) => (
+            <div
+              key={label}
+              className="rounded-2xl py-3 px-2 text-center border"
+              style={{ background: 'rgba(0, 0, 0, 0.25)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
+            >
+              <p className="text-white/70 text-[10px] font-inter uppercase tracking-wider font-bold">{label}</p>
+              <p className="text-white font-outfit font-black text-xl leading-tight mt-0.5">{value}</p>
+              <p className="text-white/60 text-[10px] font-inter font-medium">{unit}</p>
+            </div>
+          ))}
+        </motion.div>
+      </div>
+
+      {/* Reward banner */}
+      <RewardBanner
+        rewardUnlocked={rewardUnlocked}
+        nextReward={reward}
+        nextMilestoneType={nextMilestoneType}
+        nextMilestoneOptions={nextMilestoneOptions}
+        remaining={remaining}
+        nextMilestoneAt={nextMilestoneAt}
+        availableRewards={availableRewards}
+        milestones={loyaltyMilestones}
+        programSlug={program.slug}
+      />
+
+      {/* Wash history */}
+      <WashHistory washes={programWashes} programSlug={program.slug} />
+    </motion.div>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+export default function LoyaltyCard({ data, onReset }: LoyaltyCardProps) {
+  const { customer, loyaltyPrograms, recentWashes, legacy } = data;
+
+  // loyaltyPrograms may be missing on old RPC — fall back to loyalty
+  const programs = loyaltyPrograms?.length > 0
+    ? loyaltyPrograms
+    : (data.loyalty ? [data.loyalty] : []);
+
+  const hasModern = programs.length > 0;
   const hasLegacy = !!legacy;
   const [activeTab, setActiveTab] = useState<'current' | 'legacy'>(hasModern ? 'current' : 'legacy');
 
@@ -105,6 +284,15 @@ export default function LoyaltyCard({ data, onReset }: LoyaltyCardProps) {
         >
           <Sparkles className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           <span>Programa Actual</span>
+          {programs.length > 1 && (
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${
+                activeTab === 'current' ? 'bg-[#FEF2DD] text-[#002C47]' : 'bg-[#E8DECC] text-[#002C47]'
+              }`}
+            >
+              {programs.length}
+            </span>
+          )}
         </button>
 
         <button
@@ -139,154 +327,19 @@ export default function LoyaltyCard({ data, onReset }: LoyaltyCardProps) {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 10 }}
             transition={{ duration: 0.3 }}
-            className="space-y-4"
+            className="space-y-6"
           >
-            {loyalty ? (
-              <>
-                {/* ── Main loyalty card ── */}
-                {(() => {
-                  const {
-                    program,
-                    current,
-                    percentage,
-                    remaining,
-                    nextMilestoneAt,
-                    reward,
-                    rewardUnlocked,
-                    availableRewards,
-                    totalWashes,
-                    cycleNumber,
-                  } = loyalty;
-                  const milestones = PROGRAM_MILESTONES[program.slug] ?? [5, 9];
-                  const isNitido = program.slug === 'nitido';
-                  const cardClass = isNitido ? 'loyalty-card-nitido' : 'loyalty-card-premium';
-                  const accentColor = isNitido ? '#7DB7D5' : '#C89B5A';
-                  const ProgramIcon = isNitido ? Droplets : Crown;
-                  const programTitle = isNitido ? 'Programa Nítido' : 'Programa Premium';
-
-                  return (
-                    <>
-                      <div className={`${cardClass} rounded-3xl p-6 space-y-5 relative overflow-hidden`}>
-                        {/* Background decoration */}
-                        <div
-                          className="absolute top-0 right-0 w-48 h-48 rounded-full opacity-15 blur-3xl pointer-events-none"
-                          style={{ backgroundColor: accentColor, transform: 'translate(30%, -30%)' }}
-                        />
-                        <div
-                          className="absolute bottom-0 left-0 w-32 h-32 rounded-full opacity-10 blur-2xl pointer-events-none"
-                          style={{ backgroundColor: accentColor, transform: 'translate(-30%, 30%)' }}
-                        />
-
-                        {/* Card header: program badge + wash count badge */}
-                        <div className="flex items-start justify-between relative z-10">
-                          <div>
-                            <span
-                              className="inline-flex items-center gap-2 text-xs font-bold px-3.5 py-1 rounded-full font-inter uppercase tracking-wider shadow-xs"
-                              style={{
-                                background: 'rgba(0, 0, 0, 0.3)',
-                                color: accentColor,
-                                border: `1px solid ${accentColor}50`,
-                              }}
-                            >
-                              <ProgramIcon className="w-3.5 h-3.5" style={{ color: accentColor }} />
-                              {programTitle}
-                            </span>
-                            <motion.h3
-                              initial={{ opacity: 0, x: -10 }}
-                              animate={{ opacity: 1, x: 0 }}
-                              transition={{ delay: 0.15 }}
-                              className="text-white font-outfit font-black text-2xl mt-2.5 leading-tight"
-                            >
-                              {customer.name}
-                            </motion.h3>
-                            {customer.plate && (
-                              <p className="text-white/80 text-xs font-inter mt-1 flex items-center gap-1.5 font-medium">
-                                <Car className="w-3.5 h-3.5" />
-                                {customer.plate}
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Wash count badge */}
-                          <motion.div
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                            transition={{ delay: 0.25, type: 'spring', stiffness: 300 }}
-                            className="text-center relative z-10"
-                          >
-                            <div
-                              className="w-16 h-16 rounded-2xl flex flex-col items-center justify-center border shadow-md"
-                              style={{
-                                background: 'rgba(0, 0, 0, 0.35)',
-                                borderColor: `${accentColor}70`,
-                              }}
-                            >
-                              <span className="text-white font-outfit font-black text-2xl leading-none">
-                                {current}
-                              </span>
-                              <span className="text-white/70 text-[10px] font-inter leading-none mt-0.5 font-bold">
-                                / {program.cycleSize}
-                              </span>
-                            </div>
-                          </motion.div>
-                        </div>
-
-                        {/* Wash dots */}
-                        <div className="relative z-10">
-                          <WashDots
-                            current={current}
-                            cycleSize={program.cycleSize}
-                            programSlug={program.slug}
-                            milestones={milestones}
-                          />
-                        </div>
-
-                        {/* Progress bar */}
-                        <div className="relative z-10">
-                          <ProgressBar percentage={percentage} programSlug={program.slug} />
-                        </div>
-
-                        {/* Stats row */}
-                        <motion.div
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          transition={{ delay: 0.4 }}
-                          className="grid grid-cols-3 gap-3 relative z-10"
-                        >
-                          {[
-                            { label: 'Total', value: totalWashes, unit: 'lavados' },
-                            { label: 'Ciclo', value: cycleNumber + 1, unit: 'actual' },
-                            { label: 'Faltan', value: remaining, unit: 'lavados' },
-                          ].map(({ label, value, unit }) => (
-                            <div
-                              key={label}
-                              className="rounded-2xl py-3 px-2 text-center border"
-                              style={{ background: 'rgba(0, 0, 0, 0.25)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
-                            >
-                              <p className="text-white/70 text-[10px] font-inter uppercase tracking-wider font-bold">{label}</p>
-                              <p className="text-white font-outfit font-black text-xl leading-tight mt-0.5">{value}</p>
-                              <p className="text-white/60 text-[10px] font-inter font-medium">{unit}</p>
-                            </div>
-                          ))}
-                        </motion.div>
-                      </div>
-
-                      {/* Reward banner */}
-                      <RewardBanner
-                        rewardUnlocked={rewardUnlocked}
-                        nextReward={reward}
-                        remaining={remaining}
-                        nextMilestoneAt={nextMilestoneAt}
-                        availableRewards={availableRewards}
-                        programSlug={program.slug}
-                      />
-
-                      {/* Wash history */}
-                      <WashHistory washes={recentWashes} programSlug={program.slug} />
-                    </>
-                  );
-                })()}
-              </>
+            {programs.length > 0 ? (
+              programs.map((prog, i) => (
+                <LoyaltyProgramCard
+                  key={prog.program.slug}
+                  loyalty={prog}
+                  customerName={customer.name}
+                  customerPlate={customer.plate}
+                  recentWashes={recentWashes}
+                  index={i}
+                />
+              ))
             ) : (
               <motion.div
                 initial={{ opacity: 0, scale: 0.98 }}
