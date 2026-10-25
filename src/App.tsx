@@ -1,49 +1,45 @@
 import React, { useState, useCallback } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import HeroSection from './components/HeroSection';
 import LoyaltyCard from './components/LoyaltyCard';
 import SkeletonCard from './components/SkeletonCard';
 import StatusMessages from './components/StatusMessages';
 import { fetchLoyaltyCard } from './lib/loyaltyApi';
-import type { AppState, SearchFormValues, LoyaltyCardFound } from './types/loyalty';
+import type { AppState, SearchFormValues } from './types/loyalty';
 import './index.css';
 
 const queryClient = new QueryClient();
 
 function AppContent() {
-  const [appState, setAppState] = useState<AppState>({ status: 'idle' });
+  const [search, setSearch] = useState<SearchFormValues | null>(null);
+  const lookup = useQuery({
+    queryKey: ['public-loyalty', search?.name, search?.last4],
+    queryFn: () => fetchLoyaltyCard(search!.name, search!.last4),
+    enabled: search !== null,
+    staleTime: 60_000,
+    gcTime: 0,
+    retry: false,
+    // Stay within the RPC lookup limit and never poll failed searches.
+    refetchInterval: query => query.state.data?.found ? 60_000 : false,
+    refetchIntervalInBackground: false,
+  });
+
+  let appState: AppState;
+  if (!search) appState = { status: 'idle' };
+  else if (lookup.data?.found) appState = { status: 'found', data: lookup.data };
+  else if (lookup.isError) appState = { status: 'error', message: lookup.error.message };
+  else if (lookup.isPending) appState = { status: 'loading' };
+  else if (lookup.data?.error === 'rate_limited') appState = { status: 'rate_limited' };
+  else if (lookup.data?.error === 'multiple_matches') appState = { status: 'multiple_matches' };
+  else appState = { status: 'not_found' };
 
   const handleSearch = useCallback(async (values: SearchFormValues) => {
-    setAppState({ status: 'loading' });
-
-    try {
-      const result = await fetchLoyaltyCard(values.name, values.last4);
-
-      if (!result.found) {
-        const err = 'error' in result ? result.error : undefined;
-        if (err === 'rate_limited') {
-          setAppState({ status: 'rate_limited' });
-        } else if (err === 'multiple_matches') {
-          setAppState({ status: 'multiple_matches' });
-        } else {
-          setAppState({ status: 'not_found' });
-        }
-        return;
-      }
-
-      setAppState({ status: 'found', data: result as LoyaltyCardFound });
-    } catch (err) {
-      console.error('[App] Search error:', err);
-      setAppState({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Unknown error',
-      });
-    }
+    setSearch(values);
   }, []);
 
   const handleReset = useCallback(() => {
-    setAppState({ status: 'idle' });
+    setSearch(null);
   }, []);
 
   const showHero = appState.status === 'idle' || appState.status === 'loading';
@@ -109,6 +105,12 @@ function AppContent() {
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.35 }}
               >
+                {lookup.isError && (
+                  <p role="status" className="mb-4 text-sm text-center">
+                    No pudimos actualizar tu tarjeta. Mostramos la última consulta;
+                    volveremos a intentarlo automáticamente.
+                  </p>
+                )}
                 <LoyaltyCard data={appState.data} onReset={handleReset} />
               </motion.div>
             )}

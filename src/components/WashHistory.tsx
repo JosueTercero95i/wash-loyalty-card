@@ -78,9 +78,14 @@ export default function WashHistory({ washes, programSlug }: WashHistoryProps) {
                 className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                 style={{ backgroundColor: accentColor }}
               />
-              <span className="text-sm font-inter font-bold truncate" style={{ color: '#002C47' }}>
-                {wash.service}
-              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-inter font-bold truncate" style={{ color: '#002C47' }}>
+                  {wash.service}
+                </p>
+                {wash.ticketNumber && (
+                  <p className="text-xs font-inter" style={{ color: '#456A83' }}>{wash.ticketNumber}</p>
+                )}
+              </div>
             </div>
 
             {/* Date */}

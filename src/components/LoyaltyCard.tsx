@@ -197,7 +197,7 @@ function LoyaltyProgramCard({
         nextReward={reward}
         nextMilestoneType={nextMilestoneType}
         nextMilestoneOptions={nextMilestoneOptions}
-        remaining={remaining}
+        remaining={Math.max(0, nextMilestoneAt - current)}
         nextMilestoneAt={nextMilestoneAt}
         availableRewards={availableRewards}
         milestones={loyaltyMilestones}

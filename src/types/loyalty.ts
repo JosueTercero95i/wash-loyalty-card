@@ -47,6 +47,7 @@ export interface LoyaltyData {
   required: number;       // cycle_size (9)
   percentage: number;     // 0..100
   remaining: number;      // cycle_size - washes_in_cycle
+  remainingForReward?: number; // next milestone - washes_in_cycle (RPC v4)
   nextMilestoneAt: number;  // "at" value of next reward (e.g. 5 or 9)
   nextMilestoneType?: 'choice' | 'fixed';
   nextMilestoneOptions?: RewardMilestoneOption[];
@@ -63,6 +64,7 @@ export interface LoyaltyData {
 export interface RecentWash {
   date: string;     // "YYYY-MM-DD"
   service: string;  // e.g. "Lavado Premium"
+  ticketNumber?: string;
 }
 
 export interface LoyaltyCardCustomer {
